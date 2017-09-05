@@ -6,7 +6,7 @@
 
 using json = nlohmann::json;
 
-const int MAX_CONNECTIONS = 100;
+const int MAX_CONNECTIONS = 200;
 const int FOOD_MAX = 100;
 const int X_MAX = 1920;
 const int Y_MAX = 1080;
@@ -22,9 +22,7 @@ struct Vector {
   Vector(const Vector& v) : x(v.x), y(v.y) { }
   static Vector Random() { return Vector(std::rand() % X_MAX, std::rand() % Y_MAX); }
 
-  double norm() {
-    return std::sqrt(std::pow(x, 2) + std::pow(y, 2));
-  }
+  double norm() { return std::hypot(x, y); }
 
   Vector& operator+=(const Vector& v) { x += v.x; y += v.y; return *this; }
 };
@@ -44,12 +42,21 @@ struct State {
   Vector t;
   bool dead = false;
   bool spectating = false;
+  int sleeping = 0;
 
   State(int id, const Vector &p) : id(id), p(p), t(p), s(START_SIZE) {};
 
   void update(int dt) {
     Vector pt = (t - p);
     double pt_norm = pt.norm();
+
+    if (pt_norm < 0.01 && !spectating) {
+      sleeping++;
+    }
+
+    if (sleeping > 10000 ) {
+      spectating = true;
+    }
 
     double l = (dt / 5.) / (std::sqrt(s / START_SIZE));
     if (l < pt_norm) {
@@ -65,12 +72,15 @@ struct State {
     s = std::min(s, (double) (X_MAX / 4));
   }
 
-  void set_target(int x, int y) { this->t.x = x; this->t.y = y; }
   void reset() { p = Vector::Random(); s = START_SIZE; t = p; }
-  bool is_eating(const Vector &v) { return (p - v).norm() < s; }
-  bool is_eating(const State *st) { return ((p - st->p).norm() < s + st->s) && s > st->s; }
+  void set_target(int x, int y) { this->t.x = x; this->t.y = y; }
+
   void eat() { s = std::sqrt(std::pow(s, 2) + 5); }
-  void eat(const State *st) { s = std::sqrt(std::pow(s, 2) + std::pow(st->s, 2)); }
+  bool is_eating(const Vector &v) { return (p - v).norm() < s; }
+
+  void eat(const State &st) { s = std::sqrt(std::pow(s, 2) + std::pow(st.s, 2)); }
+  bool is_eating(const State &st) { return (p - st.p).norm() < s + st.s && s > st.s; }
+
   bool is_playing() { return !dead && !spectating; }
 };
 
@@ -86,18 +96,15 @@ int milliseconds_since_epoch() {
 int main() {
   uWS::Hub hub;
   int next_id = 0;
-  int connections = 0;
+  int connections_count = 0;
 
-  std::vector<Vector> foods(FOOD_MAX);
-  std::generate(foods.begin(), foods.end(), []() { return Vector::Random(); });
-
-  hub.onConnection([&next_id, &connections](uWS::WebSocket<uWS::SERVER> *ws, uWS::HttpRequest req) {
+  hub.onConnection([&next_id, &connections_count](uWS::WebSocket<uWS::SERVER> *ws, uWS::HttpRequest req) {
     int id = next_id++;
-    connections++;
+    connections_count++;
 
     State* state = new State(id, Vector::Random());
     ws->setUserData(state);
-    if(connections > MAX_CONNECTIONS) { state->spectating = true; return; };
+    if(connections_count > MAX_CONNECTIONS) { state->spectating = true; return; };
 
     json j = {{"id", id}};
     std::vector<std::uint8_t> jcbor = json::to_cbor(j);
@@ -120,11 +127,14 @@ int main() {
     }
   });
 
-  hub.onDisconnection([&connections](uWS::WebSocket<uWS::SERVER> *ws, int code, char *message, size_t length) {
+  hub.onDisconnection([&connections_count](uWS::WebSocket<uWS::SERVER> *ws, int code, char *message, size_t length) {
     State *state = (State*) ws->getUserData();
-    connections--;
+    connections_count--;
     delete state;
   });
+
+  std::vector<Vector> foods(FOOD_MAX);
+  std::generate(foods.begin(), foods.end(), []() { return Vector::Random(); });
 
   struct TimerData { uWS::Hub* hub; std::vector<Vector> *foods; int *last_timestamp; };
   TimerData timer_data = { &hub, &foods, new int };
@@ -158,8 +168,8 @@ int main() {
         State *state_opponent = (State *) ws_opponent->getUserData();
         if (!state_opponent->is_playing()) { return; }
 
-        if (state->is_eating(state_opponent)) {
-          state->eat(state_opponent);
+        if (state->is_eating(*state_opponent)) {
+          state->eat(*state_opponent);
           state_opponent->reset();
           state_opponent->dead = true;
         }
